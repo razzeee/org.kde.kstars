@@ -1,0 +1,640 @@
+Preserve upstream fixes from the former knro/LimeSuite 25.12.03 source.
+
+Generated from upstream v23.11.0 (c2d9e87754586304577beff4dc5b16fb9b72c826)
+to 524cd2e548b11084e6f739b2dfe0f958c2e30354, the upstream parent of that fork.
+This retains the existing hardware, CMake and C23 fixes, without the fork's
+unnecessary CMake minimum-version increase from 3.10 to 3.15.
+
+Upstream comparison:
+https://github.com/myriadrf/LimeSuite/compare/c2d9e87754586304577beff4dc5b16fb9b72c826...524cd2e548b11084e6f739b2dfe0f958c2e30354
+
+Revisit/remove this backport when a newer upstream release includes it.
+
+diff --git a/.github/workflows/cmake.yml b/.github/workflows/cmake.yml
+index f95f412..5bdfea6 100644
+--- a/.github/workflows/cmake.yml
++++ b/.github/workflows/cmake.yml
+@@ -18,13 +18,13 @@ jobs:
+     runs-on: ${{ matrix.os }}
+     strategy:
+             matrix:
+-                os: [ubuntu-latest, macos-latest, windows-latest]
++                os: [ubuntu-22.04, macos-latest, windows-latest]
+ 
+     steps:
+     - uses: actions/checkout@v2
+     
+     - name: Install linux dependencies
+-      if: matrix.os == 'ubuntu-latest'
++      if: matrix.os == 'ubuntu-22.04'
+       run: |
+         sudo apt-get update
+         sudo apt-get install -qq libusb-1.0-0-dev libwxbase3.0-dev libwxgtk3.0-gtk3-dev liboctave-dev
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 765e638..322c804 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ ########################################################################
+ ## Create lime-suite project
+ ########################################################################
+-cmake_minimum_required(VERSION 3.1.3)
++cmake_minimum_required(VERSION 3.10)
+ set(CMAKE_CONFIGURATION_TYPES "Debug;Release;RelWithDebInfo" CACHE STRING INTERNAL FORCE)
+ project("LimeSuite")
+ 
+@@ -11,18 +11,10 @@ option(ENABLE_NEW_GAIN_BEHAVIOUR "Enable new gain functionality" OFF)
+ #include modules for finding CyAPI
+ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/")
+ 
+-if(POLICY CMP0015)
+-    cmake_policy(SET CMP0015 NEW)
+-endif()
+-
+ if(POLICY CMP0077)
+     cmake_policy(SET CMP0077 OLD)
+ endif()
+ 
+-if(${CMAKE_MAJOR_VERSION} GREATER 2)
+-    cmake_policy(SET CMP0043 NEW)
+-endif()
+-
+ list(FIND CMAKE_CONFIGURATION_TYPES "${CMAKE_BUILD_TYPE}" index)
+ if (${index} EQUAL -1)
+    set(CMAKE_BUILD_TYPE "Release")
+@@ -95,11 +87,6 @@ if(CMAKE_COMPILER_IS_GNUCXX)
+     # include module for check_cxx_compiler_flag
+     include(CheckCXXCompilerFlag)
+ 
+-    #enable C++11 on older versions of cmake
+-    if (CMAKE_VERSION VERSION_LESS "3.1")
+-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
+-    endif()
+-
+     #enable warnings in Debug configurations
+     if (NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+     	add_compile_options(-Wall -Wpedantic)
+@@ -213,6 +200,10 @@ option(CMAKE_INSTALL_RPATH_USE_LINK_PATH "build with automatic rpath" TRUE)
+ 
+ if(APPLE)
+     set(CMAKE_MACOSX_RPATH ON)
++
++    if(CURRENT_OSX_VERSION GREATER_EQUAL 13.0)
++        SET(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib${LIB_SUFFIX}")
++    endif()
+ endif()
+ 
+ ########################################################################
+diff --git a/QuickTest/LimeSDRTest_Mini.cpp b/QuickTest/LimeSDRTest_Mini.cpp
+index 353d57b..554dccb 100644
+--- a/QuickTest/LimeSDRTest_Mini.cpp
++++ b/QuickTest/LimeSDRTest_Mini.cpp
+@@ -37,12 +37,24 @@ int LimeSDRTest_Mini::RFTest()
+             return false;
+         if (device->GetLMS()->SetFrequencySX(lime::LMS7002M::Rx, freq)!=0)
+             return false;
+-	extern int limeversion;
+-	RFTestData testinfo;
+-	if	(limeversion == 1)
+-		testinfo = {freq, freq+tx_offset, -14, tx_offset, 0};
+-	else
+-        	testinfo = {freq, freq+tx_offset, -20, tx_offset, 0};
++    extern int limeversion;
++    lms_dev_info_t* info = device->GetInfo();
++    RFTestData testinfo;
++    if (limeversion == 1) // v1.*
++        testinfo = {freq, freq+tx_offset, -14, tx_offset, 0};
++    else
++    {
++        int hw_version = std::stoi(info->hardwareVersion);
++        switch(hw_version)
++        {
++        case 5: // V2.2
++            testinfo = {freq, freq+tx_offset, -30, tx_offset, 0};
++            break;
++        default: // V2.4
++            testinfo = {freq, freq+tx_offset, -20, tx_offset, 0};
++            break;
++        }
++    }
+         device->SetPath(false, 0, rxPath);
+         device->SetPath(true, 0, rxPath==1? 1 : 2);
+         if (device->GetConnection()->WriteRegister(0x17, rxPath==1? 0x2200:0x1100) != 0)
+diff --git a/SoapyLMS7/Streaming.cpp b/SoapyLMS7/Streaming.cpp
+index 7a57142..de9c48f 100644
+--- a/SoapyLMS7/Streaming.cpp
++++ b/SoapyLMS7/Streaming.cpp
+@@ -106,6 +106,17 @@ SoapySDR::ArgInfoList SoapyLMS7::getStreamArgsInfo(const int direction, const si
+         argInfos.push_back(info);
+     }
+ 
++    // channel selection
++    {
++      SoapySDR::ArgInfo info;
++      info.value = "0";
++      info.key = "channel";
++      info.name = "Channel";
++      info.description = "List of channels to use, separated by spaces. Defaults to 0.";
++      info.type = SoapySDR::ArgInfo::INT;
++      argInfos.push_back(info);
++    }
++
+     //align phase of Rx channels
+     {
+         SoapySDR::ArgInfo info;
+@@ -143,8 +154,41 @@ SoapySDR::Stream *SoapyLMS7::setupStream(
+     config.performanceLatency = 0.5;
+     config.bufferLength = 0; //auto
+ 
+-    //default to channel 0, if none were specified
+-    const std::vector<size_t> &channelIDs = channels.empty() ? std::vector<size_t>{0} : channels;
++    std::vector<size_t> chans = {};
++
++    /* Try to use the channels passed in the `channel` device argument */
++    if (_deviceArgs.count("channel")) {
++        const std::string channelstr = _deviceArgs.at("channel");
++
++        size_t num;
++        std::stringstream ss(channelstr);
++
++        while (ss >> num) {
++            chans.push_back(num);
++        }
++
++        if (chans.empty()) {
++            SoapySDR::logf(SOAPY_SDR_ERROR, "Couldn't parse 'channels' string '%s': it should be a list of integers separated by spaces.", channelstr.c_str());
++        }
++    }
++
++    if (chans.empty()) {
++        /* If `channel` was not present, or was not a valid string, try to use channels
++         * passed as an argument to this function, or default to using channel 0. */
++        if (channels.empty()) {
++            /* No channels specified, default to 0. */
++            chans = std::vector<size_t>{0};
++        } else {
++            /* Use the channels from the function argument. */
++            chans = channels;
++        }
++    }
++
++    for (auto &ch : chans) {
++        SoapySDR::logf(SOAPY_SDR_INFO, "Using channel %zu", ch);
++    }
++
++    const std::vector<size_t> &channelIDs = chans;
+     for(size_t i=0; i<channelIDs.size(); ++i)
+     {
+         config.channelID = channelIDs[i];
+diff --git a/mcu_program/CMakeLists.txt b/mcu_program/CMakeLists.txt
+index 9a35478..a80e0de 100644
+--- a/mcu_program/CMakeLists.txt
++++ b/mcu_program/CMakeLists.txt
+@@ -1,5 +1,5 @@
+ #project directory inside LimeSuite/mcu_program
+-cmake_policy(SET CMP0003 NEW)
++
+ #C++11 is a required language feature for this project
+ set(CMAKE_CXX_STANDARD 11)
+ 
+@@ -8,12 +8,6 @@ cmake_dependent_option(ENABLE_MCU_TESTBENCH "MCU functions testing project" OFF
+ if(ENABLE_MCU_TESTBENCH)
+ 
+ if(CMAKE_COMPILER_IS_GNUCXX)
+-
+-    #enable C++11 on older versions of cmake
+-    if (CMAKE_VERSION VERSION_LESS "3.1")
+-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11x")
+-    endif()
+-
+     #common warnings enabled
+     add_compile_options(-Wall)
+ endif()
+diff --git a/src/API/LimeSDR_mini.cpp b/src/API/LimeSDR_mini.cpp
+index 489da32..ca94bdc 100644
+--- a/src/API/LimeSDR_mini.cpp
++++ b/src/API/LimeSDR_mini.cpp
+@@ -328,8 +328,10 @@ int LMS7_LimeSDR_mini::SetClockFreq(unsigned clk_id, double freq, int channel)
+ int LMS7_LimeSDR_mini::EnableChannel(bool dir_tx, unsigned chan, bool enabled)
+ {
+     int ret = LMS7_Device::EnableChannel(dir_tx, chan, enabled);
+-    if (lms_list[0]->Get_SPI_Reg_bits(0x82, 4, 1) == 0xD) //TX requires ADC to be enabled
+-        lms_list[0]->Modify_SPI_Reg_bits(LMS7_PD_RX_AFE1, 0);
++
++    // both ADC and DAC are required to be enabled due to clocking reasons
++    lms_list[0]->Modify_SPI_Reg_bits(LMS7_PD_RX_AFE1, 0);
++    lms_list[0]->Modify_SPI_Reg_bits(LMS7_PD_TX_AFE1, 0);
+     return ret;
+ }
+ 
+diff --git a/src/ConnectionFTDI/ConnectionFT601.cpp b/src/ConnectionFTDI/ConnectionFT601.cpp
+index a3884e0..06ba773 100644
+--- a/src/ConnectionFTDI/ConnectionFT601.cpp
++++ b/src/ConnectionFTDI/ConnectionFT601.cpp
+@@ -749,7 +749,7 @@ int ConnectionFT601::ProgramWrite(const char *data_src, size_t length, int prog_
+ 
+     FPGAinfo fpgainfo = GetFPGAInfo();
+ 
+-    if (fpgainfo.hwVersion < 3)
++    if (fpgainfo.boardID == LMS_DEV_LIMESDRMINI && fpgainfo.hwVersion <= 3)
+     {
+         // LimeSDR-Mini v1.X
+         if (fpgainfo.gatewareVersion != 0)
+diff --git a/src/FPGA_common/FPGA_common.cpp b/src/FPGA_common/FPGA_common.cpp
+index 4e81f33..31c2d37 100644
+--- a/src/FPGA_common/FPGA_common.cpp
++++ b/src/FPGA_common/FPGA_common.cpp
+@@ -2,6 +2,7 @@
+ #include "IConnection.h"
+ #include "LMS64CProtocol.h"
+ #include <ciso646>
++#include <chrono>
+ #include <vector>
+ #include <map>
+ #include <math.h>
+diff --git a/src/GFIR/corrections.c b/src/GFIR/corrections.c
+index decee2f..6e3431e 100644
+--- a/src/GFIR/corrections.c
++++ b/src/GFIR/corrections.c
+@@ -26,8 +26,7 @@
+ /* ************************************************************ */
+ /* Inverse sinc function to correct DAC sinc envelope 		*/
+ /* ************************************************************ */
+-double InvSinc(x)
+-double x;
++double InvSinc(double x)
+ {
+ 	if(fpclassify(x) == FP_ZERO) return(1.0);
+ 	return(fabs((M_PI*x)/(sin(M_PI*x) + DELTA)));
+@@ -36,8 +35,7 @@ double x;
+ /* ************************************************************ */
+ /* Invsinc function shifted into lower frequency stage.		*/
+ /* ************************************************************ */
+-double InvSincS(x, k, x0)
+-double x, k, x0;
++double InvSincS(double x, double k, double x0)
+ {
+ 	double xin;
+ 
+@@ -49,8 +47,7 @@ double x, k, x0;
+ /* ************************************************************ */
+ /* Unity function, no correction is envolved.			*/
+ /* ************************************************************ */
+-double One(x)
+-double x;
++double One(double x)
+ {
+ 	return(1.0);
+-}
+\ No newline at end of file
++}
+diff --git a/src/GFIR/dfilter.h b/src/GFIR/dfilter.h
+index c202612..921d1b3 100644
+--- a/src/GFIR/dfilter.h
++++ b/src/GFIR/dfilter.h
+@@ -21,4 +21,4 @@ struct dfilter {
+ 	double phase[POINTS];
+ 	double logamp[POINTS];		/* Amplitude in log scale */
+ 	double max;			/* Maximum of amplitude */
+-};
+\ No newline at end of file
++};
+diff --git a/src/GFIR/gfir_lms.c b/src/GFIR/gfir_lms.c
+index f0bb1be..24a8f1f 100644
+--- a/src/GFIR/gfir_lms.c
++++ b/src/GFIR/gfir_lms.c
+@@ -21,13 +21,12 @@
+ #define CSDPREC		16	/* CSD Coefficients precision */
+ 
+ /* *********************************************************************** */
+-int gfir_lms(hr, hi, hcsd, n, w1, w2, a1, a2, cprec, csdprec, correction)
+-  struct dfilter *hr, *hi, *hcsd;
+-int n;
+-double w1, w2, a1, a2;
+-int cprec;
+-int csdprec;
+-double (*correction)();
++int gfir_lms(struct dfilter *hr, struct dfilter *hi, struct dfilter *hcsd,
++             int n,
++             double w1, double w2, double a1, double a2,
++             int cprec,
++             int csdprec,
++             double (*correction)(double x))
+ {
+   double *weights, *desired, *w;
+   int i, points;
+diff --git a/src/GFIR/lms.c b/src/GFIR/lms.c
+index 09e4ec9..2ff8f58 100644
+--- a/src/GFIR/lms.c
++++ b/src/GFIR/lms.c
+@@ -24,9 +24,9 @@
+ #define ODD     1
+ 
+ /* Declare functions from Numerical Recipes that are used here */
+-double  *vector();
+-int  *ivector();
+-double  **matrix();
++double  *vector(int nl, int nh);
++int  *ivector(int nl, int nh);
++double  **matrix(int nrl, int nrh, int ncl, int nch);
+     
+ /* ************************************************************************ 
+  *  Trigonometric functions for CASE1, CASE2, CASE3 and CASE4 filters
+@@ -78,18 +78,10 @@ double Case4F(double w, int i)
+  *	0			- if everything is OK
+  *	-1			- otherwise
+  * ************************************************************************ */
+-int lms(hr, hi, hcsd, n, w, des, weight, p, cprec, csdprec, symmetry,
+-	bincode, csdcode, csdcoder)
+-double *hr, *hi, *hcsd;
+-int n;
+-double *w;
+-double *des;
+-double *weight;
+-int p;
+-int cprec;
+-int csdprec;
+-int symmetry;
+-int **bincode, **csdcode, **csdcoder;
++int lms(double *hr, double *hi, double *hcsd,
++        int n, double *w, double *des, double *weight,
++        int p, int cprec, int csdprec, int symmetry,
++        int **bincode, int **csdcode, int **csdcoder)
+ {
+ 
+ 	/* All this is for  solving a linear system */
+@@ -100,7 +92,7 @@ int **bincode, **csdcode, **csdcoder;
+ 	/* Parameters of real function Hr(w) */
+ 	double *a; 		/* Coefficients */
+ 	int L;			/* Number of terms in Hr(w) sum */
+-	double (*f)();		/* Trigonometric function in Hr(w) */
++	double (*f)(double w, int i);		/* Trigonometric function in Hr(w) */
+ 	
+ 	int parity;		/* Parity of the filter (ODD or EVEN) */
+ 	int i, j, k;		/* Loop counters */
+diff --git a/src/GFIR/lms.h b/src/GFIR/lms.h
+index f1f470d..8cd4e95 100644
+--- a/src/GFIR/lms.h
++++ b/src/GFIR/lms.h
+@@ -21,9 +21,9 @@
+ #define LMS_POINTS 4000
+ 
+ /* Amplitude correction functions */
+-double InvSinc();
+-double InvSincS();
+-double One();
++double InvSinc(double x);
++double InvSincS(double x);
++double One(double x);
+ 
+ /* Amplitude correction functions we can support */
+ #define NONE		One		/* Constant */
+diff --git a/src/GFIR/recipes.c b/src/GFIR/recipes.c
+index dc5c1ac..865d642 100644
+--- a/src/GFIR/recipes.c
++++ b/src/GFIR/recipes.c
+@@ -57,8 +57,7 @@ void nrerror(char * error_text);
+ /*****************************************************/
+ /*** Allocates a double vector with range [nl..nh]. ***/
+ /*****************************************************/
+-double  *vector(nl,nh)
+-int    nl,nh;
++double  *vector(int nl, int nh)
+ {
+ 	double *v;
+ 
+@@ -70,8 +69,7 @@ int    nl,nh;
+ /*****************************************************/
+ /*** Allocates an int vector with range [nl..nh].  ***/
+ /*****************************************************/
+-int  *ivector(nl,nh)
+-int  nl,nh;
++int  *ivector(int nl, int nh)
+ {
+ 	int *v;
+ 
+@@ -83,9 +81,7 @@ int  nl,nh;
+ /****************************************************/
+ /*** Frees a double vector allocated by vector().  ***/
+ /****************************************************/
+-void free_vector(v,nl,nh)
+-double *v;
+-int   nl,nh;
++void free_vector(double *v, int nl, int nh)
+ {
+ 	free((char*) (v+nl));
+ }
+@@ -93,9 +89,7 @@ int   nl,nh;
+ /****************************************************/
+ /*** Frees an int vector allocated by ivector().  ***/
+ /****************************************************/
+-void free_ivector(v,nl,nh)
+-int *v;
+-int   nl,nh;
++void free_ivector(int *v, int nl, int nh)
+ {
+ 	free((char*) (v+nl));
+ }
+@@ -104,8 +98,7 @@ int   nl,nh;
+ /****  Allocates a double matrix with    ****/
+ /****  range [nrl..nrh] [ncl..nch].     ****/
+ /*******************************************/
+-double  **matrix(nrl,nrh,ncl,nch)
+-int  nrl,nrh,ncl,nch;
++double  **matrix(int nrl, int nrh, int ncl, int nch)
+ {
+ 	int    i;
+ 	double  **m;
+@@ -129,9 +122,7 @@ int  nrl,nrh,ncl,nch;
+ /****   Frees a matrix allocated by ... ***/
+ /****   matrix().                       ***/
+ /******************************************/
+-void free_matrix(m,nrl,nrh,ncl,nch)
+-double **m;
+-int   nrl,nrh,ncl,nch;
++void free_matrix(double **m, int nrl, int nrh, int ncl, int nch)
+ {
+ 	int i;
+  
+@@ -142,11 +133,8 @@ int   nrl,nrh,ncl,nch;
+ /*************************************************/
+ /*** Numerical Recipes standard error handler. ***/
+ /*************************************************/
+-void nrerror(error_text)
+-char error_text[];
++void nrerror(char error_text[])
+ {
+-	void exit();
+-
+ 	fprintf(stderr,"Numerical Recipes run-time error...\n");
+ 	fprintf(stderr,"%s\n",error_text);
+ 	fprintf(stderr,"Forced to exit.\n");
+@@ -160,14 +148,11 @@ char error_text[];
+ /*	indx[1:n]		temporary storage,			*/
+ /*	d			temporary storage.			*/
+ /* ******************************************************************** */
+-int ludcmp(a,n,indx,d)
+-int n, *indx;
+-double **a,*d;
++int ludcmp(double **a, int n, int *indx, double *d)
+ {
+ 	int i,imax,j,k;
+ 	double big,dum,sum,temp;
+-	double *vv,*vector();
+-	void free_vector();
++	double *vv;
+ 
+ 	imax = 0; 
+ 
+@@ -223,9 +208,7 @@ double **a,*d;
+ /* ******************************************************************** */
+ /* Solve system of equation						*/
+ /* ******************************************************************** */
+-void lubksb(a,n,indx,b)
+-double **a,b[];
+-int n,indx[];
++void lubksb(double **a, int n, int indx[], double b[])
+ {
+ 	int i,ii=0,ip,j;
+ 	double sum;
+diff --git a/src/GFIR/rounding.c b/src/GFIR/rounding.c
+index ea9aeed..23d5674 100644
+--- a/src/GFIR/rounding.c
++++ b/src/GFIR/rounding.c
+@@ -17,9 +17,7 @@ int csd2int(int cprec, int *code);
+ 
+ /* ************************************************************************ 
+    ************************************************************************ */
+-void round2int(a, b, n, cprec)
+-double *a, *b;
+-int n, cprec;
++void round2int(double *a, double *b, int n, int cprec)
+ {
+ 	int i,k;
+ 
+@@ -32,10 +30,8 @@ int n, cprec;
+ 
+ /* ************************************************************************ 
+    ************************************************************************ */
+-void round2csd(a, b, n, cprec, csdprec, bincode, csdcode, csdcoder)
+-double *a, *b;
+-int n, cprec, csdprec;
+-int **bincode, **csdcode, **csdcoder;
++void round2csd(double *a, double *b, int n, int cprec, int csdprec,
++               int **bincode, int **csdcode, int **csdcoder)
+ {
+ 	int i,k, ia;
+ 
+@@ -118,8 +114,7 @@ void printcode(int ** code, int n, int cprec)
+ /* ************************************************************************ 
+    Print CSD code in the form of two common sub-expressions sharing 
+    ************************************************************************ */
+-void print_cses_code(xpx, xmx, x, n, cprec)
+-int **xpx, **xmx, **x, n, cprec;
++void print_cses_code(int **xpx, int **xmx, int **x, int n, int cprec)
+ {
+ 	int i, j;
+ 	int symmetry;
+@@ -193,14 +188,14 @@ int **xpx, **xmx, **x, n, cprec;
+ }
+ 
+ /* ************************************************************************ 
++ * int a		Input integer to be converted into CSD code
++ * int cprec	Integer precision
++ * int csdprec	CSD precistion
++ * int *bincode	Binary code
++ * int *csdcode	CSD code
++ * int *csdcoder	CSD code rounded to 'csdprec' nonzero bits
+    ************************************************************************ */
+-void int2csd(a, cprec, csdprec, bincode, csdcode, csdcoder)
+-int a;		/* Input integer to be converted into CSD code */
+-int cprec;	/* Integer precision */
+-int csdprec;	/* CSD precistion */
+-int *bincode;	/* Binary code */
+-int *csdcode;	/* CSD code */
+-int *csdcoder;	/* CSD code rounded to 'csdprec' nonzero bits */
++void int2csd(int a, int cprec, int csdprec, int *bincode, int *csdcode, int *csdcoder)
+ {
+ 	int i, sign, ci, ci1, nzeroes;
+ 
+@@ -243,8 +238,7 @@ int *csdcoder;	/* CSD code rounded to 'csdprec' nonzero bits */
+ 
+ /* ************************************************************************ 
+    ************************************************************************ */
+-int csd2int(cprec, code)
+-int cprec, *code;
++int csd2int(int cprec, int *code)
+ {
+ 	int i, a;
+ 	
+@@ -257,9 +251,7 @@ int cprec, *code;
+ /* ************************************************************************ 
+ 	Extract x+x>>2 and x-x>>2 subexpressions from the CSD code
+    ************************************************************************ */
+-void csesh(code, n, cprec, xpx, xmx, x )
+-int n, cprec;
+-int **code, **xpx, **xmx, **x;
++void csesh(int **code, int n, int cprec, int **xpx, int **xmx, int **x)
+ {
+ 	int i, k;
+ 
+diff --git a/src/examples/singleRX.cpp b/src/examples/singleRX.cpp
+index 56384e9..3cdab62 100644
+--- a/src/examples/singleRX.cpp
++++ b/src/examples/singleRX.cpp
+@@ -54,6 +54,9 @@ int main(int argc, char** argv)
+     if (LMS_Init(device) != 0)
+         error();
+ 
++    if (LMS_EnableChannel(device, LMS_CH_TX, 0, true)!=0)	// Fix for v2
++        error();
++
+     //Enable RX channel
+     //Channels are numbered starting at 0
+     if (LMS_EnableChannel(device, LMS_CH_RX, 0, true) != 0)
+diff --git a/src/lms7002m_mcu/MCU_BD.cpp b/src/lms7002m_mcu/MCU_BD.cpp
+index 7ec4250..7d730d7 100644
+--- a/src/lms7002m_mcu/MCU_BD.cpp
++++ b/src/lms7002m_mcu/MCU_BD.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include "MCU_BD.h"
+ using namespace std;
++#include <chrono>
+ #include <string>
+ #include "MCU_File.h"
+ #include <sstream>
+diff --git a/src/protocols/fifo.h b/src/protocols/fifo.h
+index f811558..5bc9d75 100644
+--- a/src/protocols/fifo.h
++++ b/src/protocols/fifo.h
+@@ -4,6 +4,7 @@
+ #include <mutex>
+ #include <condition_variable>
+ #include <atomic>
++#include <chrono>
+ #include <vector>
+ #include <thread>
+ #include <queue>
+diff --git a/src/utilities_gui/pnlMiniLog.cpp b/src/utilities_gui/pnlMiniLog.cpp
+index 8613fe6..3ffe9b7 100644
+--- a/src/utilities_gui/pnlMiniLog.cpp
++++ b/src/utilities_gui/pnlMiniLog.cpp
+@@ -76,11 +76,14 @@ pnlMiniLog::pnlMiniLog(wxWindow* parent, wxWindowID id, const wxPoint& pos, cons
+     // default will always use the black color. Explicitly setting the color to
+     // the color provided via the default attribute makes the text colored
+     // correctly on both dark and light modes.
++    //
++    // Do it for both foreground and background, so that the style can be fully
++    // restored after it has been altered for the error or warning.
++    const wxVisualAttributes attr = txtMessageField->GetDefaultAttributes();
+     if (!mDefaultStyle.HasTextColour())
+-    {
+-        const wxVisualAttributes attr = txtMessageField->GetDefaultAttributes();
+         mDefaultStyle.SetTextColour(attr.colFg);
+-    }
++    if (!mDefaultStyle.HasBackgroundColour())
++        mDefaultStyle.SetBackgroundColour(attr.colBg);
+ }
+ 
+ void pnlMiniLog::HandleMessage(wxCommandEvent &event)
